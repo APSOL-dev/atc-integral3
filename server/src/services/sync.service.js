@@ -43,15 +43,28 @@ async function syncFromSqlToSupabase(force = false) {
     try {
       const clientes = await mssqlService.getClientes();
       if (Array.isArray(clientes) && clientes.length > 0) {
-        const chunks = chunkArray(clientes, CHUNK_SIZE);
+        const mappedClientes = clientes.map(c => ({
+          nro_cliente: c.NRO_CLIENTE,
+          nombre_cliente: c.NOMBRE_CLIENTE,
+          cuit: c.CUIT,
+          saldo: c.SALDO !== undefined && c.SALDO !== null ? Number(c.SALDO) : 0,
+          vendedor: c.VENDEDOR,
+          nro_vendedor: c.NRO_VENDEDOR !== undefined && c.NRO_VENDEDOR !== null ? Number(c.NRO_VENDEDOR) : null,
+          localidad: c.LOCALIDAD,
+          provincia: c.PROVINCIA,
+          telefono: c.TELE,
+          suc: c.SUC !== undefined && c.SUC !== null ? Number(c.SUC) : null,
+          direc: c.DIREC || null,
+          synced_at: new Date().toISOString()
+        }));
+
+        const chunks = chunkArray(mappedClientes, CHUNK_SIZE);
         for (const chunk of chunks) {
-          const { error } = await supabaseService.supabase
-            .from('atc_sql_clientes_v')
-            .upsert(chunk);
+          const { error } = await supabaseService.supabase.rpc('sync_bulk_clientes', { payload: chunk });
           if (error) throw error;
         }
         clientesCount = clientes.length;
-        console.log(`✅ Sincronizados ${clientesCount} clientes en atc_sql_clientes_v`);
+        console.log(`✅ Sincronizados ${clientesCount} clientes en atc_migración.sql_clientes`);
       }
     } catch (err) {
       console.warn('⚠️ No se pudieron sincronizar clientes desde SQL Server:', err.message);
@@ -62,15 +75,29 @@ async function syncFromSqlToSupabase(force = false) {
     try {
       const productos = await mssqlService.getProductos();
       if (Array.isArray(productos) && productos.length > 0) {
-        const chunks = chunkArray(productos, CHUNK_SIZE);
+        const mappedProductos = productos.map(p => ({
+          codart: p.CODART,
+          descri: p.DESCRI,
+          cc_civa: p.CC_CIVA !== undefined && p.CC_CIVA !== null ? Number(p.CC_CIVA) : null,
+          stock: p.stock !== undefined && p.stock !== null ? Number(p.stock) : 0,
+          familia: p.FAMILIA !== undefined && p.FAMILIA !== null ? Number(p.FAMILIA) : null,
+          nombre_familia: p.NombreFamilia || null,
+          rubro: p.RUBRO !== undefined && p.RUBRO !== null ? Number(p.RUBRO) : null,
+          nombre_rubro: p.NombreRubro || null,
+          marca: p.MARCA !== undefined && p.MARCA !== null ? Number(p.MARCA) : null,
+          nombre_marca: p.NombreMarca || null,
+          embalaje: p.Embalaje != null ? String(p.Embalaje) : null,
+          proveedor: p.Proveedor || null,
+          synced_at: new Date().toISOString()
+        }));
+
+        const chunks = chunkArray(mappedProductos, CHUNK_SIZE);
         for (const chunk of chunks) {
-          const { error } = await supabaseService.supabase
-            .from('atc_sql_productos_v')
-            .upsert(chunk);
+          const { error } = await supabaseService.supabase.rpc('sync_bulk_productos', { payload: chunk });
           if (error) throw error;
         }
         productosCount = productos.length;
-        console.log(`✅ Sincronizados ${productosCount} productos en atc_sql_productos_v`);
+        console.log(`✅ Sincronizados ${productosCount} productos en atc_migración.sql_productos`);
       }
     } catch (err) {
       console.warn('⚠️ No se pudieron sincronizar productos desde SQL Server:', err.message);
@@ -81,12 +108,19 @@ async function syncFromSqlToSupabase(force = false) {
     try {
       const vendedores = await mssqlService.getVendedores();
       if (Array.isArray(vendedores) && vendedores.length > 0) {
-        const { error } = await supabaseService.supabase
-          .from('atc_sql_vendedores_v')
-          .upsert(vendedores);
+        const mappedVendedores = vendedores.map(v => ({
+          nro_vendedor: v.NRO_VENDEDOR || v.VDOR,
+          nombre: v.NOMBRE,
+          alias: v.ALIAS,
+          vdor: v.VDOR !== undefined && v.VDOR !== null ? Number(v.VDOR) : (v.NRO_VENDEDOR || null),
+          activo: v.ACTIVO !== undefined && v.ACTIVO !== null ? Number(v.ACTIVO) : 1,
+          synced_at: new Date().toISOString()
+        }));
+
+        const { error } = await supabaseService.supabase.rpc('sync_bulk_vendedores', { payload: mappedVendedores });
         if (error) throw error;
         vendedoresCount = vendedores.length;
-        console.log(`✅ Sincronizados ${vendedoresCount} vendedores en atc_sql_vendedores_v`);
+        console.log(`✅ Sincronizados ${vendedoresCount} vendedores en atc_migración.sql_vendedores`);
       }
     } catch (err) {
       console.warn('⚠️ No se pudieron sincronizar vendedores desde SQL Server:', err.message);
@@ -97,15 +131,30 @@ async function syncFromSqlToSupabase(force = false) {
     try {
       const dbPedidos = await mssqlService.getPedidosFromDB();
       if (Array.isArray(dbPedidos) && dbPedidos.length > 0) {
-        const chunks = chunkArray(dbPedidos, CHUNK_SIZE);
+        const mappedPedidos = dbPedidos.map(p => ({
+          id_pedido: p.IDPedido,
+          cliente: p.IDCliente != null ? String(p.IDCliente) : (p.Cliente != null ? String(p.Cliente) : null),
+          fecha_hora: p.Fecha_Hora ? new Date(p.Fecha_Hora).toISOString() : null,
+          direccion: p.Direccion || null,
+          creado_por: p.Creado_Por || null,
+          observaciones: p.Observaciones || null,
+          fecha_ultima_modificacion: p.Fecha_Ultima_Modificacion ? new Date(p.Fecha_Ultima_Modificacion).toISOString() : null,
+          estado: p.Estado != null ? String(p.Estado) : '1',
+          vendedor: p.Vendedor != null ? String(p.Vendedor) : null,
+          nro_pedidogestion: p.Nro_PedidoGestion != null ? String(p.Nro_PedidoGestion) : null,
+          nro_pedidoreferencia: p.Nro_PedidoReferencia != null ? String(p.Nro_PedidoReferencia) : null,
+          estado_enviado: p.EstadoEnviado ? 1 : 0,
+          total: p.Total !== undefined && p.Total !== null ? Number(p.Total) : 0,
+          synced_at: new Date().toISOString()
+        }));
+
+        const chunks = chunkArray(mappedPedidos, CHUNK_SIZE);
         for (const chunk of chunks) {
-          const { error } = await supabaseService.supabase
-            .from('atc_sql_pedidos_cabe_v')
-            .upsert(chunk);
+          const { error } = await supabaseService.supabase.rpc('sync_bulk_pedidos_cabe', { payload: chunk });
           if (error) throw error;
         }
         pedidosCabeCount = dbPedidos.length;
-        console.log(`✅ Sincronizados ${pedidosCabeCount} pedidos en atc_sql_pedidos_cabe_v`);
+        console.log(`✅ Sincronizados ${pedidosCabeCount} pedidos en atc_migración.sql_pedidos_cabe`);
       }
     } catch (err) {
       console.warn('⚠️ No se pudieron sincronizar pedidos cabecera desde SQL Server:', err.message);
@@ -116,15 +165,29 @@ async function syncFromSqlToSupabase(force = false) {
     try {
       const dbDetalles = await mssqlService.getDetallesFromDB();
       if (Array.isArray(dbDetalles) && dbDetalles.length > 0) {
-        const chunks = chunkArray(dbDetalles, CHUNK_SIZE);
+        const mappedDetalles = dbDetalles.map(d => ({
+          id_detalle: String(d.IdDetalle || `${d.IdPedido}_${d.ItemCodigo}_${Math.random()}`),
+          id_pedido: Number(d.IdPedido),
+          item_codigo: d.ItemCodigo != null ? String(d.ItemCodigo) : null,
+          nombre_item: d.NombreItem || null,
+          cantidad: d.Cantidad !== undefined && d.Cantidad !== null ? Number(d.Cantidad) : 0,
+          descuento: d.Descuento !== undefined && d.Descuento !== null ? Number(d.Descuento) : 0,
+          porcent: d.PORCENT !== undefined && d.PORCENT !== null ? Number(d.PORCENT) : (d.porcent !== undefined ? Number(d.porcent) : 0),
+          precio: d.Precio !== undefined && d.Precio !== null ? Number(d.Precio) : 0,
+          sub_total: d.Sub_Total !== undefined && d.Sub_Total !== null ? Number(d.Sub_Total) : 0,
+          total: d.Total !== undefined && d.Total !== null ? Number(d.Total) : 0,
+          cantidad_preparada: d.CantidadPreparada !== undefined && d.CantidadPreparada !== null ? Number(d.CantidadPreparada) : 0,
+          id_renglon_gestion: d.IdRenglonGestion != null ? String(d.IdRenglonGestion) : null,
+          synced_at: new Date().toISOString()
+        }));
+
+        const chunks = chunkArray(mappedDetalles, CHUNK_SIZE);
         for (const chunk of chunks) {
-          const { error } = await supabaseService.supabase
-            .from('atc_sql_pedidos_deta_v')
-            .upsert(chunk);
+          const { error } = await supabaseService.supabase.rpc('sync_bulk_pedidos_deta', { payload: chunk });
           if (error) throw error;
         }
         pedidosDetaCount = dbDetalles.length;
-        console.log(`✅ Sincronizados ${pedidosDetaCount} renglones de pedidos en atc_sql_pedidos_deta_v`);
+        console.log(`✅ Sincronizados ${pedidosDetaCount} renglones de pedidos en atc_migración.sql_pedidos_deta`);
       }
     } catch (err) {
       console.warn('⚠️ No se pudieron sincronizar detalles de pedidos desde SQL Server:', err.message);
