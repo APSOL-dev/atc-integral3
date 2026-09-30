@@ -40,22 +40,40 @@ const ALLOWED_COLUMNS_BY_VIEW = {
     'Cantidad', 'Descuento', 'Precio', 'Subtotal (precio x cantidad)',
     'Monto del descuento', 'Total (subtotal - monto del descuento)',
     'Stock al momento de cargar', 'Proveedor'
+  ]),
+  atc_sql_clientes_v: new Set([
+    'NRO_CLIENTE', 'NOMBRE_CLIENTE', 'CUIT', 'SALDO', 'VENDEDOR', 'NRO_VENDEDOR', 'LOCALIDAD', 'PROVINCIA', 'TELE', 'SUC', 'DIREC', 'synced_at'
+  ]),
+  atc_sql_productos_v: new Set([
+    'CODART', 'DESCRI', 'CC_CIVA', 'stock', 'FAMILIA', 'NombreFamilia', 'RUBRO', 'NombreRubro', 'MARCA', 'NombreMarca', 'Embalaje', 'Proveedor', 'synced_at'
+  ]),
+  atc_sql_vendedores_v: new Set([
+    'NRO_VENDEDOR', 'NOMBRE', 'ALIAS', 'VDOR', 'ACTIVO', 'synced_at'
+  ]),
+  atc_sql_pedidos_cabe_v: new Set([
+    'IDPedido', 'Cliente', 'Fecha_Hora', 'Direccion', 'Creado_Por', 'Observaciones', 'Fecha_Ultima_Modificacion', 'Estado', 'Vendedor', 'Nro_PedidoGestion', 'Nro_PedidoReferencia', 'EstadoEnviado', 'Total', 'synced_at'
+  ]),
+  atc_sql_pedidos_deta_v: new Set([
+    'IdDetalle', 'IdPedido', 'ItemCodigo', 'NombreItem', 'Cantidad', 'Descuento', 'PORCENT', 'Precio', 'Sub_Total', 'Total', 'CantidadPreparada', 'IdRenglonGestion', 'synced_at'
+  ]),
+  atc_sync_cola_pedidos_v: new Set([
+    'id', 'id_pedido', 'accion', 'nuevo_estado', 'payload_pedido', 'payload_detalles', 'status', 'intentos', 'ultimo_error', 'created_at', 'updated_at', 'synced_at'
   ])
 };
 
 const INTEGER_COLUMNS = new Set([
-  'Cliente', 'Vendedor', 'NRO_VENDEDOR', 'Intentos fallidos'
+  'Cliente', 'Vendedor', 'NRO_VENDEDOR', 'Intentos fallidos', 'NRO_CLIENTE', 'CODART', 'FAMILIA', 'RUBRO', 'MARCA', 'SUC', 'VDOR', 'ACTIVO', 'EstadoEnviado', 'id_pedido'
 ]);
 
 const NUMERIC_COLUMNS = new Set([
   'Porcentaje de descuento (%)', 'Total', 'Cantidad', 'Descuento', 'Precio',
   'Subtotal (precio x cantidad)', 'Monto del descuento', 'Total (subtotal - monto del descuento)',
-  'Stock al momento de cargar'
+  'Stock al momento de cargar', 'SALDO', 'CC_CIVA', 'stock', 'PORCENT', 'Sub_Total', 'CantidadPreparada'
 ]);
 
 const DATE_COLUMNS = new Set([
   'Fecha y hora', 'Emitido Fecha', 'Fecha de envio', 'Fecha de envío',
-  'Fecha_Ultima_Modificacion', 'Fecha y Hora de Última Modificación', 'Bloqueado hasta'
+  'Fecha_Ultima_Modificacion', 'Fecha y Hora de Última Modificación', 'Bloqueado hasta', 'Fecha_Hora', 'synced_at', 'created_at', 'updated_at'
 ]);
 
 function sanitizeRow(tableName, rowObj) {
@@ -76,12 +94,23 @@ function sanitizeRow(tableName, rowObj) {
 
 /**
  * Normaliza las peticiones de lectura hacia las vistas públicas de Supabase
- * @param {string} viewName 'atc_usuarios_v' | 'atc_pedidos_v' | 'atc_detalles_pedidos_v'
  */
 async function getRows(viewName) {
   let tableName = 'atc_usuarios_v';
   const lowerViewName = String(viewName || '').toLowerCase();
-  if (lowerViewName.includes('usuarios')) {
+  if (lowerViewName.includes('sql_clientes')) {
+    tableName = 'atc_sql_clientes_v';
+  } else if (lowerViewName.includes('sql_productos')) {
+    tableName = 'atc_sql_productos_v';
+  } else if (lowerViewName.includes('sql_vendedores')) {
+    tableName = 'atc_sql_vendedores_v';
+  } else if (lowerViewName.includes('sql_pedidos_cabe')) {
+    tableName = 'atc_sql_pedidos_cabe_v';
+  } else if (lowerViewName.includes('sql_pedidos_deta')) {
+    tableName = 'atc_sql_pedidos_deta_v';
+  } else if (lowerViewName.includes('sync_cola')) {
+    tableName = 'atc_sync_cola_pedidos_v';
+  } else if (lowerViewName.includes('usuarios')) {
     tableName = 'atc_usuarios_v';
   } else if (lowerViewName.includes('detalles')) {
     tableName = 'atc_detalles_pedidos_v';
@@ -101,11 +130,35 @@ async function getRows(viewName) {
   let page = 0;
   const pageSize = 1000;
   const lowerTableName = tableName.toLowerCase();
-  const isDetalles = lowerTableName.includes('detalles');
-  const orderCol = isDetalles
-    ? 'IDDetalle'
-    : (lowerTableName.includes('usuarios') ? 'Nombre de usuario' : 'IDPedido');
-  const isAscending = isDetalles;
+  
+  let orderCol = 'IDPedido';
+  let isAscending = false;
+
+  if (lowerTableName.includes('sql_clientes')) {
+    orderCol = 'NOMBRE_CLIENTE';
+    isAscending = true;
+  } else if (lowerTableName.includes('sql_productos')) {
+    orderCol = 'DESCRI';
+    isAscending = true;
+  } else if (lowerTableName.includes('sql_vendedores')) {
+    orderCol = 'NOMBRE';
+    isAscending = true;
+  } else if (lowerTableName.includes('sql_pedidos_deta')) {
+    orderCol = 'IdDetalle';
+    isAscending = true;
+  } else if (lowerTableName.includes('sql_pedidos_cabe')) {
+    orderCol = 'IDPedido';
+    isAscending = false;
+  } else if (lowerTableName.includes('detalles')) {
+    orderCol = 'IDDetalle';
+    isAscending = true;
+  } else if (lowerTableName.includes('usuarios')) {
+    orderCol = 'Nombre de usuario';
+    isAscending = true;
+  } else if (lowerTableName.includes('sync_cola')) {
+    orderCol = 'id';
+    isAscending = true;
+  }
 
   while (true) {
     const { data, error } = await supabase

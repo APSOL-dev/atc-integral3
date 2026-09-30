@@ -1,3 +1,4 @@
+process.env.NODE_ENV = 'test';
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
@@ -7,8 +8,7 @@ require('dotenv').config();
 const app = require('../src/app');
 const { poolPromise } = require('../src/config/mssql');
 const mssqlService = require('../src/services/mssql.service');
-const sheetsService = require('../src/services/sheets.service');
-const { rowsToObjects } = require('../src/utils/sheetMapper');
+const supabaseService = require('../src/services/supabase.service');
 
 let server;
 let baseUrl;
@@ -41,7 +41,7 @@ after(async () => {
 function getAuthHeaders() {
   const token = jwt.sign(
     { id: 'test-user-id', username: 'TestUser', rol: 'admin' },
-    process.env.JWT_SECRET || 'fallback-secret',
+    process.env.JWT_SECRET || 'fallback-jwt-secret',
     { expiresIn: '1h' }
   );
   return {
@@ -50,19 +50,18 @@ function getAuthHeaders() {
   };
 }
 
-test('Suite de integración: Consolidación de Pedidos (Sheets vs SQL vs API)', async (t) => {
+test('Suite de integración: Consolidación de Pedidos (Supabase App vs SQL vs API)', async (t) => {
 
-  let sheetIds = [];
+  let appIds = [];
   let dbIds = [];
   let apiPedidos = [];
   let apiIds = new Set();
 
-  await t.test('1. Obtener datos de todas las fuentes de datos (Sheets, SQL, API)', async () => {
-    // 1. Obtener pedidos de Google Sheets
-    const rows = await sheetsService.getRows('Pedidos!A1:AZ');
-    const sheetPedidos = rowsToObjects(rows).filter(p => p.IDPedido && p.IDPedido.toString().trim() !== '');
-    sheetIds = sheetPedidos
-      .map(p => parseInt(p.IDPedido.toString().trim(), 10))
+  await t.test('1. Obtener datos de todas las fuentes de datos (Supabase App, SQL, API)', async () => {
+    // 1. Obtener pedidos de Supabase App
+    const appPedidos = await supabaseService.getRows('atc_pedidos_v');
+    appIds = appPedidos
+      .map(p => parseInt(p.IDPedido?.toString().trim(), 10))
       .filter(id => !isNaN(id));
     
     // 2. Obtener pedidos de SQL Server
@@ -80,14 +79,14 @@ test('Suite de integración: Consolidación de Pedidos (Sheets vs SQL vs API)', 
     apiPedidos = await res.json();
     apiIds = new Set(apiPedidos.map(p => parseInt(p.IDPedido, 10)));
 
-    console.log(`\n[Test setup] Total en Sheets: ${sheetIds.length}, Total en SQL: ${dbIds.length}, Total en API: ${apiPedidos.length}`);
+    console.log(`\n[Test setup] Total en Supabase App: ${appIds.length}, Total en SQL: ${dbIds.length}, Total en API: ${apiPedidos.length}`);
   });
 
-  await t.test('2. Validar que cada pedido de Google Sheets esté presente en la API', () => {
-    for (const id of sheetIds) {
+  await t.test('2. Validar que cada pedido de Supabase App esté presente en la API', () => {
+    for (const id of appIds) {
       assert.ok(
         apiIds.has(id),
-        `El pedido con ID ${id} (de Google Sheets) no fue consolidado o no se encuentra en la API.`
+        `El pedido con ID ${id} (de Supabase App) no fue consolidado o no se encuentra en la API.`
       );
     }
   });
@@ -102,14 +101,12 @@ test('Suite de integración: Consolidación de Pedidos (Sheets vs SQL vs API)', 
   });
 
   await t.test('4. Validar la consistencia numérica (Total Consolidado vs Unión de fuentes)', () => {
-    // La API consolida uniendo Sheets y SQL por IDPedido.
-    // El total devuelto por la API debe ser exactamente igual a la unión de los IDs de ambas fuentes.
-    const expectedUnion = new Set([...sheetIds, ...dbIds]);
+    const expectedUnion = new Set([...appIds, ...dbIds]);
     
     assert.strictEqual(
       apiIds.size,
       expectedUnion.size,
-      `La cantidad de pedidos devueltos por la API (${apiIds.size}) difiere de la unión de conjuntos de Sheets y SQL (${expectedUnion.size}).`
+      `La cantidad de pedidos devueltos por la API (${apiIds.size}) difiere de la unión de conjuntos de Supabase App y SQL (${expectedUnion.size}).`
     );
   });
 });

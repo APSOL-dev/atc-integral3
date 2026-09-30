@@ -27,7 +27,7 @@ describe('Persistencia y orden secuencial de detalles en pedidos 0.0', () => {
     // pero ya fue editado y tiene 2 renglones en Supabase
     supabaseService.getRows = async (table) => {
       const lower = String(table).toLowerCase();
-      if (lower.includes('pedidos') && !lower.includes('detalles')) {
+      if (lower === 'atc_pedidos_v') {
         return [
           {
             IDPedido: '11047400',
@@ -44,7 +44,7 @@ describe('Persistencia y orden secuencial de detalles en pedidos 0.0', () => {
           }
         ];
       }
-      if (lower.includes('detalles')) {
+      if (lower === 'atc_detalles_pedidos_v') {
         return [
           // Supabase devuelve los detalles (p. ej. en cualquier orden de inserción)
           {
@@ -93,6 +93,7 @@ describe('Persistencia y orden secuencial de detalles en pedidos 0.0', () => {
     const app = express();
     app.use(express.json());
     const pedidosRouter = require('../src/routes/pedidos.routes');
+    if (pedidosRouter.invalidatePedidosCache) pedidosRouter.invalidatePedidosCache();
     app.use('/api/pedidos', pedidosRouter);
 
     server = http.createServer(app);

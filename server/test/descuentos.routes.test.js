@@ -1,7 +1,7 @@
 // server/test/descuentos.routes.test.js
 // Tests de integración para rutas /api/descuentos-marca (soft delete y proyección estado/fecha_baja)
 
-const { test, describe, before, after } = require('node:test');
+const { test, it, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
 const jwt = require('jsonwebtoken');

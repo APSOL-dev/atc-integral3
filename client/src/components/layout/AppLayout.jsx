@@ -32,7 +32,7 @@ const NAV_ITEMS = [
 
 export default function AppLayout() {
   const { user, logout, loading } = useAuth()
-  const { serverHealth } = useData()
+  const { serverHealth, isSyncingMirror, forceMirrorSync, syncStatus } = useData()
   const location = useLocation()
   const navigate = useNavigate()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -155,25 +155,40 @@ export default function AppLayout() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3 sm:gap-6">
-
+          <div className="flex items-center gap-3 sm:gap-4">
+            {/* Sincronizar Espejo Button */}
+            <button
+              onClick={() => forceMirrorSync()}
+              disabled={isSyncingMirror}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all ${
+                isSyncingMirror
+                  ? 'bg-blue-50 text-[#0f5da9] border-blue-200 cursor-not-allowed'
+                  : 'bg-white text-slate-700 hover:text-[#0f5da9] hover:bg-blue-50/50 border-slate-200 shadow-sm'
+              }`}
+              title="Sincronizar catálogo y pedidos con SQL Server"
+            >
+              <RefreshCw size={14} className={isSyncingMirror ? 'animate-spin text-[#0f5da9]' : ''} />
+              <span className="hidden sm:inline">{isSyncingMirror ? 'Sincronizando...' : 'Sincronizar'}</span>
+            </button>
 
             <div className="hidden md:flex flex-col items-end">
-              <span className="text-[10px] uppercase tracking-widest text-[#1e293b]/40 font-bold">Estado conexión</span>
-              {serverHealth?.mssql && serverHealth?.supabase ? (
-                <span className="text-xs font-bold text-emerald-500 flex items-center gap-1.5" title="Conexión SQL Server y Supabase OK">
-                  <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  Conectado
-                </span>
-              ) : !serverHealth?.mssql ? (
-                <span className="text-xs font-bold text-red-500 flex items-center gap-1.5" title="Sin conexión a SQL Server (Requiere VPN/Red Local)">
-                  <span className="size-1.5 rounded-full bg-red-500 animate-pulse" />
-                  Error de servidor
-                </span>
+              <span className="text-[10px] uppercase tracking-widest text-[#1e293b]/40 font-bold">Estado</span>
+              {serverHealth?.supabase ? (
+                serverHealth?.mssql ? (
+                  <span className="text-xs font-bold text-emerald-600 flex items-center gap-1.5" title="Conexión en tiempo real con SQL Server y Supabase">
+                    <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    En Línea (SQL Server)
+                  </span>
+                ) : (
+                  <span className="text-xs font-bold text-sky-600 flex items-center gap-1.5" title="Operando con base de datos espejo en Supabase. Los cambios se sincronizarán al reconectar.">
+                    <span className="size-1.5 rounded-full bg-sky-500" />
+                    Espejo Supabase (Offline-Ready)
+                  </span>
+                )
               ) : (
-                <span className="text-xs font-bold text-red-500 flex items-center gap-1.5" title="Sin conexión a Supabase">
+                <span className="text-xs font-bold text-red-500 flex items-center gap-1.5" title="Sin conexión con el servidor principal">
                   <span className="size-1.5 rounded-full bg-red-500 animate-pulse" />
-                  Error interno
+                  Sin conexión
                 </span>
               )}
             </div>

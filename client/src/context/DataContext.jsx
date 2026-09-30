@@ -24,6 +24,18 @@ export function DataProvider({ children }) {
   const lastSyncRef = useRef(null)
   const [secondsLeft, setSecondsLeft] = useState(30)
   const [serverHealth, setServerHealth] = useState({ status: 'ok', mssql: true, supabase: true })
+  const [syncStatus, setSyncStatus] = useState(null)
+  const [isSyncingMirror, setIsSyncingMirror] = useState(false)
+
+  const fetchSyncStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/sync/estado`)
+      if (res.ok) {
+        const data = await res.json()
+        setSyncStatus(data)
+      }
+    } catch (e) {}
+  }, [])
 
   const checkHealth = useCallback(async () => {
     try {
@@ -41,9 +53,14 @@ export function DataProvider({ children }) {
 
   useEffect(() => {
     checkHealth()
+    fetchSyncStatus()
     const healthInterval = setInterval(checkHealth, 15000)
-    return () => clearInterval(healthInterval)
-  }, [checkHealth])
+    const syncStatusInterval = setInterval(fetchSyncStatus, 60000)
+    return () => {
+      clearInterval(healthInterval)
+      clearInterval(syncStatusInterval)
+    }
+  }, [checkHealth, fetchSyncStatus])
 
   // Preloading cache for Clientes to achieve instant page transitions
   const [preloadedClientes, setPreloadedClientes] = useState({})
@@ -392,6 +409,29 @@ export function DataProvider({ children }) {
       .catch(err => console.error('Error removing descuento marca from server:', err))
   }, [fetchDescuentosMarca])
 
+  const forceMirrorSync = useCallback(async () => {
+    const storedUser = localStorage.getItem('atc_user')
+    let userObj = null
+    try { if (storedUser) userObj = JSON.parse(storedUser) } catch {}
+    const headers = userObj?.token ? { 'Authorization': `Bearer ${userObj.token}` } : {}
+
+    setIsSyncingMirror(true)
+    try {
+      const res = await fetch(`${API_URL}/sync/forzar`, { method: 'POST', headers })
+      const data = await res.json()
+      if (data?.resultado) {
+        setSyncStatus(data.resultado)
+      }
+      await fetchPedidos(false, true)
+      return { success: true, data }
+    } catch (err) {
+      console.error('Error in forceMirrorSync:', err)
+      return { success: false, error: err.message }
+    } finally {
+      setIsSyncingMirror(false)
+    }
+  }, [fetchPedidos])
+
   // Reactive initial fetch when entering wholesale app routes or when token is ready
   useEffect(() => {
     const isWholesaleRoute = location.pathname.startsWith('/atc') || 
@@ -442,6 +482,9 @@ export function DataProvider({ children }) {
       fetchPedidos,
       secondsLeft,
       serverHealth,
+      syncStatus,
+      isSyncingMirror,
+      forceMirrorSync,
       // Navigation
       prevPath,
       // Pedidos Filters & Page size

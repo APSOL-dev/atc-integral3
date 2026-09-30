@@ -14,18 +14,29 @@ const startServer = (portToTry) => {
     console.log(`📊 Google Sheets ID: ${process.env.SPREADSHEET_ID}`);
     console.log(`🗄️  MSSQL Host: ${process.env.MSSQL_HOST}:${process.env.MSSQL_PORT}`);
 
+    // Start periodic background sync (SQL Server <-> Supabase Mirror)
+    try {
+      const syncService = require('./src/services/sync.service');
+      syncService.startPeriodicSync(20);
+      console.log('🔄 Periodic background sync initialized (every 20 min)');
+    } catch (err) {
+      console.warn('⚠️ Could not initialize sync worker:', err.message);
+    }
+
     // Pre-warm Supabase and MSSQL cache so first user request is instant
     try {
       const supabaseService = require('./src/services/supabase.service');
-      const mssqlService = require('./src/services/mssql.service');
-      console.log('🔥 Pre-warming Supabase and MSSQL caches...');
+      console.log('🔥 Pre-warming Supabase mirror and order caches...');
       await Promise.allSettled([
         supabaseService.getRows('atc_pedidos_v'),
         supabaseService.getRows('atc_detalles_pedidos_v'),
-        mssqlService.getClientes(),
-        mssqlService.getProductos()
+        supabaseService.getRows('atc_sql_clientes_v'),
+        supabaseService.getRows('atc_sql_productos_v'),
+        supabaseService.getRows('atc_sql_vendedores_v'),
+        supabaseService.getRows('atc_sql_pedidos_cabe_v'),
+        supabaseService.getRows('atc_sql_pedidos_deta_v')
       ]);
-      console.log('✅ Supabase & MSSQL cache warm-up complete');
+      console.log('✅ Supabase cache warm-up complete');
     } catch (err) {
       console.warn('⚠️  Cache warm-up error (will load on first request):', err.message);
     }

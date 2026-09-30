@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const supabaseService = require('../services/supabase.service');
 const mssqlService = require('../services/mssql.service');
+const syncService = require('../services/sync.service');
 const auth = require('../middlewares/auth');
 
 // Protect all routes
@@ -123,12 +124,23 @@ let creationQueue = Promise.resolve();
 // Helper to map vendedor names
 async function mapVendedorNames(pedidos) {
   try {
-    const withTimeout = (promise, ms, fallback = []) =>
-      Promise.race([
-        promise,
-        new Promise(resolve => setTimeout(() => resolve(fallback), ms))
-      ]);
-    const vendedores = await withTimeout(mssqlService.getVendedores(), 4000, []);
+    let vendedores = [];
+    try {
+      const mirrorVendedores = await supabaseService.getRows('atc_sql_vendedores_v');
+      if (Array.isArray(mirrorVendedores) && mirrorVendedores.length > 0) {
+        vendedores = mirrorVendedores;
+      }
+    } catch (e) {}
+
+    if (!vendedores || vendedores.length === 0) {
+      const withTimeout = (promise, ms, fallback = []) =>
+        Promise.race([
+          promise,
+          new Promise(resolve => setTimeout(() => resolve(fallback), ms))
+        ]);
+      vendedores = await withTimeout(mssqlService.getVendedores(), 3000, []);
+    }
+
     pedidos.forEach(pedido => {
       const rawId = pedido.Vendedor || pedido['Emitido por'];
       const vdorId = String(rawId || '').trim();
@@ -246,14 +258,14 @@ async function getCompletePedidos() {
     return pedidosCache;
   }
 
-  const withTimeout = (promise, ms, fallback = []) =>
-    Promise.race([
-      promise,
-      new Promise(resolve => setTimeout(() => resolve(fallback), ms))
-    ]);
-
-  // Fetch all Supabase data + MSSQL DB data in parallel
-  const [supabasePedidos, supabaseDetalles, dbPedidos, dbDetalles, sqlProducts] = await Promise.all([
+  // Fetch all Supabase App data + Supabase Mirror data in parallel
+  const [
+    supabasePedidos,
+    supabaseDetalles,
+    mirrorDbPedidos,
+    mirrorDbDetalles,
+    mirrorProducts
+  ] = await Promise.all([
     supabaseService.getRows('atc_pedidos_v').catch(err => {
       console.error('Error fetching Supabase pedidos:', err.message);
       return [];
@@ -262,19 +274,25 @@ async function getCompletePedidos() {
       console.error('Error fetching Supabase detalles:', err.message);
       return [];
     }),
-    withTimeout(mssqlService.getPedidosFromDB(), 10000).catch(err => {
-      console.error('Error fetching DB pedidos for cache:', err.message);
-      throw err;
-    }),
-    withTimeout(mssqlService.getDetallesFromDB(), 10000).catch(err => {
-      console.error('Error fetching DB detalles for cache:', err.message);
-      throw err;
-    }),
-    withTimeout(mssqlService.getProductos(), 10000).catch(err => {
-      console.error('Error fetching SQL products for cache:', err.message);
-      return [];
-    })
+    supabaseService.getRows('atc_sql_pedidos_cabe_v').catch(() => []),
+    supabaseService.getRows('atc_sql_pedidos_deta_v').catch(() => []),
+    supabaseService.getRows('atc_sql_productos_v').catch(() => [])
   ]);
+
+  let dbPedidos = mirrorDbPedidos;
+  let dbDetalles = mirrorDbDetalles;
+  let sqlProducts = mirrorProducts;
+
+  // Fallback to MSSQL only if mirror views are empty
+  if (!dbPedidos || dbPedidos.length === 0) {
+    dbPedidos = await mssqlService.getPedidosFromDB().catch(() => []);
+  }
+  if (!dbDetalles || dbDetalles.length === 0) {
+    dbDetalles = await mssqlService.getDetallesFromDB().catch(() => []);
+  }
+  if (!sqlProducts || sqlProducts.length === 0) {
+    sqlProducts = await mssqlService.getProductos().catch(() => []);
+  }
 
   const productProviderMap = new Map();
   const productStockMap = new Map();
@@ -342,6 +360,8 @@ async function getCompletePedidos() {
       if (existingSupabaseOrder['Porcentaje de descuento (%)'] !== undefined) {
         p['Porcentaje de descuento (%)'] = existingSupabaseOrder['Porcentaje de descuento (%)'];
       }
+    } else if ((!details || details.length === 0) && supabaseDetailsByPedido[id] && supabaseDetailsByPedido[id].length > 0) {
+      details = (supabaseDetailsByPedido[id] || []).slice();
     }
 
     details.sort((a, b) => String(a.IDDetalle || '').localeCompare(String(b.IDDetalle || ''), undefined, { numeric: true }));
@@ -501,7 +521,7 @@ router.post('/', (req, res, next) => {
         'Total': header.Total || 0,
         'Fecha_Ultima_Modificacion': now.toISOString(),
         'Fecha y Hora de Última Modificación': now.toISOString(),
-        'Estado': '0',
+        'Estado': header.Estado || '0',
         'Vendedor': vdorFinal || ''
       };
       
@@ -549,6 +569,10 @@ router.post('/', (req, res, next) => {
         }
       }
 
+      if (pedidoData.Estado === '1' || pedidoData.Estado === '1.' || pedidoData.Estado === '0.0.99') {
+        await syncService.queueOutboundOrder(newId, 'INSERT_OR_UPDATE', pedidoData, detailObjects, pedidoData.Estado);
+      }
+
       invalidatePedidosCache();
       res.status(201).json({ IDPedido: newId, message: 'Pedido creado exitosamente' });
     } catch (error) {
@@ -585,23 +609,30 @@ router.patch('/:id/estado', async (req, res, next) => {
     const now = new Date();
     const cleanStatus = String(estado).trim();
     
-    // Check if it exists in the database
-    const dbPedidos = await mssqlService.getPedidosFromDB().catch(() => []);
-    const existsInDB = dbPedidos.some(p => String(p.IDPedido) === String(pedidoId));
+    // Check if it exists in mirror or DB
+    const mirrorPedidos = await supabaseService.getRows('atc_sql_pedidos_cabe_v').catch(() => []);
+    const existsInMirror = mirrorPedidos.some(p => String(p.IDPedido) === String(pedidoId));
     
-    if (existsInDB) {
-      await withRetry(() => mssqlService.updatePedidoEstadoInDB(pedidoId, cleanStatus));
+    if (existsInMirror) {
+      // Update mirror in Supabase
+      await supabaseService.updateRows('atc_sql_pedidos_cabe_v', { IDPedido: parseInt(pedidoId) }, {
+        Estado: cleanStatus,
+        Fecha_Ultima_Modificacion: now.toISOString()
+      }).catch(() => {});
       
-      // Update in Supabase if present
+      // Update in App Pedidos if present
       await supabaseService.updateRows('atc_pedidos_v', { IDPedido: pedidoId }, {
         Estado: cleanStatus,
         Fecha_Ultima_Modificacion: now.toISOString()
-      });
+      }).catch(() => {});
+
+      // Enqueue outbound sync to SQL Server
+      await syncService.queueOutboundOrder(pedidoId, 'UPDATE_ESTADO', null, null, cleanStatus);
       invalidatePedidosCache();
-      return res.json({ message: 'Estado del pedido en Base de Datos actualizado exitosamente', newStatus: cleanStatus });
+      return res.json({ message: 'Estado del pedido actualizado y sincronizado exitosamente', newStatus: cleanStatus });
     }
     
-    // Draft in Supabase
+    // Draft in Supabase (atc_pedidos_v)
     const supabasePedidos = await supabaseService.getRows('atc_pedidos_v');
     const pedidoObj = supabasePedidos.find(p => String(p.IDPedido) === String(pedidoId));
     
@@ -610,9 +641,10 @@ router.patch('/:id/estado', async (req, res, next) => {
     pedidoObj.Estado = cleanStatus;
     pedidoObj.Fecha_Ultima_Modificacion = now.toISOString();
     
+    let detalles = [];
     if (cleanStatus === '1' || cleanStatus === '1.' || cleanStatus === '0.0.99') {
       let allDetalles = await supabaseService.getRows('atc_detalles_pedidos_v');
-      let detalles = allDetalles.filter(d => String(d.IDPedido) === String(pedidoId));
+      detalles = allDetalles.filter(d => String(d.IDPedido) === String(pedidoId));
       
       // Auto-recovery: If Supabase has 0 details but client payload provided details, auto-persist to Supabase first!
       if ((!detalles || detalles.length === 0) && req.body.detalles && req.body.detalles.length > 0) {
@@ -659,7 +691,8 @@ router.patch('/:id/estado', async (req, res, next) => {
         return res.status(400).json({ message: 'No se puede enviar un pedido sin detalles a la base de datos' });
       }
       
-      await withRetry(() => mssqlService.createPedidoInDB(pedidoObj, detalles), 4, 1000, true);
+      // Enqueue outbound insert/update to SQL Server
+      await syncService.queueOutboundOrder(pedidoId, 'INSERT_OR_UPDATE', pedidoObj, detalles, cleanStatus);
     }
     
     await supabaseService.updateRows('atc_pedidos_v', { IDPedido: pedidoId }, {
@@ -668,7 +701,7 @@ router.patch('/:id/estado', async (req, res, next) => {
     });
     
     invalidatePedidosCache();
-    res.json({ message: 'Estado actualizado exitosamente en Supabase y Base de Datos', newStatus: cleanStatus });
+    res.json({ message: 'Estado actualizado exitosamente en Supabase y encolado para Base de Datos', newStatus: cleanStatus });
   } catch (error) {
     next(error);
   }
@@ -679,18 +712,21 @@ router.delete('/:id', async (req, res, next) => {
   try {
     const pedidoId = req.params.id;
     
-    const dbPedidos = await mssqlService.getPedidosFromDB().catch(() => []);
-    const dbPedido = dbPedidos.find(p => String(p.IDPedido) === String(pedidoId));
+    const mirrorPedidos = await supabaseService.getRows('atc_sql_pedidos_cabe_v').catch(() => []);
+    const mirrorPedido = mirrorPedidos.find(p => String(p.IDPedido) === String(pedidoId));
     
-    if (dbPedido) {
-      const state = String(dbPedido.Estado || '').trim();
+    if (mirrorPedido) {
+      const state = String(mirrorPedido.Estado || '').trim();
       if (state === '0.0') {
-        await withRetry(() => mssqlService.updatePedidoEstadoInDB(pedidoId, '0.0.99'));
-        await supabaseService.updateRows('atc_pedidos_v', { IDPedido: pedidoId }, { Estado: '0.0.99' });
+        await syncService.queueOutboundOrder(pedidoId, 'UPDATE_ESTADO', null, null, '0.0.99');
+        await supabaseService.updateRows('atc_sql_pedidos_cabe_v', { IDPedido: parseInt(pedidoId) }, { Estado: '0.0.99' }).catch(() => {});
+        await supabaseService.updateRows('atc_pedidos_v', { IDPedido: pedidoId }, { Estado: '0.0.99' }).catch(() => {});
         invalidatePedidosCache();
         return res.json({ message: 'Pedido de sistema anulado correctamente' });
       } else {
-        await withRetry(() => mssqlService.deletePedidoFromDB(pedidoId));
+        await syncService.queueOutboundOrder(pedidoId, 'DELETE');
+        await supabaseService.deleteRows('atc_sql_pedidos_deta_v', { IdPedido: parseInt(pedidoId) }).catch(() => {});
+        await supabaseService.deleteRows('atc_sql_pedidos_cabe_v', { IDPedido: parseInt(pedidoId) }).catch(() => {});
       }
     }
     
@@ -712,10 +748,14 @@ router.put('/:id', async (req, res, next) => {
     const { header, detalles } = req.body;
     const now = new Date();
     
-    const dbPedidos = await mssqlService.getPedidosFromDB().catch(() => []);
-    const dbPedido = dbPedidos.find(p => String(p.IDPedido) === String(pedidoId));
+    const mirrorPedidos = await supabaseService.getRows('atc_sql_pedidos_cabe_v').catch(() => []);
+    let mirrorPedido = mirrorPedidos.find(p => String(p.IDPedido) === String(pedidoId));
+    if (!mirrorPedido) {
+      const dbPedidos = await mssqlService.getPedidosFromDB().catch(() => []);
+      mirrorPedido = dbPedidos.find(p => String(p.IDPedido) === String(pedidoId));
+    }
     
-    const headerDescPct = parseCurrency(header.Descuento || header['Porcentaje de descuento (%)'] || (dbPedido ? dbPedido.PorcentajeDescuento : 19) || 19);
+    const headerDescPct = parseCurrency(header.Descuento || header['Porcentaje de descuento (%)'] || (mirrorPedido ? mirrorPedido.PorcentajeDescuento : 19) || 19);
     const generalMultiplier = Math.max(0, 1 - (headerDescPct / 100));
 
     const newDetailRows = (detalles || []).map((item, idx) => {
@@ -752,7 +792,7 @@ router.put('/:id', async (req, res, next) => {
     const existingPedidos = await supabaseService.getRows('atc_pedidos_v').catch(() => []);
     const existingPedido = existingPedidos.find(p => String(p.IDPedido) === String(pedidoId));
     
-    if (!dbPedido && !existingPedido) {
+    if (!mirrorPedido && !existingPedido) {
       return res.status(404).json({ message: 'Pedido no encontrado' });
     }
     
@@ -765,7 +805,7 @@ router.put('/:id', async (req, res, next) => {
       'Estado', 'Vendedor', 'Nro_PedidoGestion', 'Nro_PedidoReferencia'
     ]);
 
-    const baseSource = existingPedido || (dbPedido ? mapDbPedidoToSheetFormat(dbPedido) : {});
+    const baseSource = existingPedido || (mirrorPedido ? mapDbPedidoToSheetFormat(mirrorPedido) : {});
     const rawUpdated = {
       ...baseSource,
       ...header,
@@ -780,8 +820,8 @@ router.put('/:id', async (req, res, next) => {
       }
     });
 
-    if (dbPedido) {
-      await withRetry(() => mssqlService.updatePedidoInDB(pedidoId, updatedPedido, newDetailRows));
+    if (mirrorPedido) {
+      await withRetry(() => mssqlService.updatePedidoInDB(pedidoId, updatedPedido, newDetailRows)).catch(() => {});
     }
 
     if (existingPedido) {
@@ -809,79 +849,13 @@ router.put('/:id', async (req, res, next) => {
       await supabaseService.insertRows('atc_detalles_pedidos_v', sanitizedDetails);
     }
     
+    // Enqueue outbound update to SQL Server
+    await syncService.queueOutboundOrder(pedidoId, 'INSERT_OR_UPDATE', updatedPedido, newDetailRows, updatedPedido.Estado);
+
     invalidatePedidosCache();
     res.json({ message: 'Pedido actualizado exitosamente' });
   } catch (error) {
     console.error('Error updating pedido:', error);
-    next(error);
-  }
-});
-
-// GET pedido by ID
-router.get('/:id', async (req, res, next) => {
-  try {
-    const pedidoId = req.params.id;
-    
-    if (pedidosCache) {
-      const found = pedidosCache.find(p => String(p.IDPedido) === String(pedidoId));
-      if (found) {
-        return res.json(found);
-      }
-    }
-    
-    const dbPedidos = await mssqlService.getPedidosFromDB().catch(() => []);
-    const dbPedido = dbPedidos.find(p => String(p.IDPedido) === String(pedidoId));
-    
-    let pedido;
-    let detalles = [];
-    
-    const [sqlProducts] = await Promise.all([
-      mssqlService.getProductos().catch(err => {
-        console.error('Error fetching SQL products for single pedido:', err.message);
-        return [];
-      })
-    ]);
-    
-    const productProviderMap = new Map();
-    const productStockMap = new Map();
-    if (Array.isArray(sqlProducts)) {
-      sqlProducts.forEach(prod => {
-        const key = String(prod.CODART).trim().toLowerCase();
-        if (prod.CODART && prod.Proveedor) productProviderMap.set(key, String(prod.Proveedor).trim());
-        if (prod.CODART && prod.stock !== undefined) productStockMap.set(key, prod.stock);
-      });
-    }
-    
-    if (dbPedido) {
-      pedido = mapDbPedidoToSheetFormat(dbPedido);
-      const dbDetalles = await mssqlService.getDetallesFromDB().catch(() => []);
-      detalles = dbDetalles
-        .filter(d => String(d.IdPedido) === String(pedidoId))
-        .map(mapDbDetalleToSheetFormat);
-    } else {
-      const [supabasePedidos, supabaseDetalles] = await Promise.all([
-        supabaseService.getRows('atc_pedidos_v'),
-        supabaseService.getRows('atc_detalles_pedidos_v')
-      ]);
-      const foundPedido = supabasePedidos.find(p => String(p.IDPedido) === String(pedidoId));
-      
-      if (!foundPedido) return res.status(404).json({ message: 'Pedido no encontrado' });
-      
-      pedido = foundPedido;
-      detalles = supabaseDetalles.filter(d => String(d.IDPedido) === String(pedidoId));
-    }
-    
-    pedido.detalles = detalles.map(d => {
-      const code = String(d['Codigo (más alla de si es item o nombre)'] || d['Item  codigo'] || '').trim().toLowerCase();
-      if (productProviderMap.has(code)) d.Proveedor = productProviderMap.get(code);
-      if (!d.Proveedor || d.Proveedor === '—') d.Proveedor = '—';
-      if (productStockMap.has(code)) d.StockActual = productStockMap.get(code);
-      return d;
-    });
-
-    await mapVendedorNames([pedido]);
-    res.json(pedido);
-  } catch (error) {
     next(error);
   }
 });
@@ -900,3 +874,4 @@ setTimeout(() => {
 
 module.exports = router;
 module.exports.formatDate = formatDate;
+module.exports.invalidatePedidosCache = invalidatePedidosCache;

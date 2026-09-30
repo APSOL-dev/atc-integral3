@@ -89,6 +89,7 @@ app.use('/api/pedidos',   require('./routes/pedidos.routes'));
 app.use('/api/usuarios',  require('./routes/usuarios.routes'));
 app.use('/api/tablero',   require('./routes/tablero.routes'));
 app.use('/api/descuentos-marca', require('./routes/descuentos.routes'));
+app.use('/api/sync',      require('./routes/sync.routes'));
 
 // Serve static frontend files in production if client build exists
 if (clientDistPath) {
